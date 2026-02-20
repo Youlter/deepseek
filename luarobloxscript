@@ -1,10 +1,10 @@
 --[[
-    High-End Modular Script Framework
+    High-End Modular Script Framework (Fixed)
     Game: [INSERT GAME NAME]
-    Architecture: Modular (UI, Combat, Visuals, Utils, Settings)
-    Design: Glassmorphism with Electric Purple accents
-    Features: pSilent Aim, ESP (Box, Tracer, Health, Skeleton), Dynamic FOV, Config Saver
-    Optimized for performance & bypass (Safe Mode)
+    Fixes:
+    - FOV circle now a single object that follows cursor.
+    - UI is draggable and rendered on top of ESP.
+    - UI redrawn each frame for proper layering.
 ]]
 
 -- Services
@@ -18,7 +18,7 @@ local Mouse = LocalPlayer:GetMouse()
 -- Drawing library (if not supported, fallback to simple UI; assume executor has Drawing)
 local Drawing = Drawing or nil
 if not Drawing then
-    warn("Drawing library not available – ESP will be disabled.")
+    warn("Drawing library not available – ESP and UI will be disabled.")
 end
 
 -- ============================================
@@ -94,6 +94,9 @@ local Settings = {
     },
     Misc = {
         SafeMode = false,
+    },
+    UI = {
+        WindowPos = Vector2.new(100, 100), -- initial position
     }
 }
 
@@ -105,6 +108,7 @@ function Settings:Load()
         self.Combat = decoded.Combat or self.Combat
         self.Visuals = decoded.Visuals or self.Visuals
         self.Misc = decoded.Misc or self.Misc
+        self.UI = decoded.UI or self.UI
     end
 end
 
@@ -112,7 +116,8 @@ function Settings:Save()
     local data = game:GetService("HttpService"):JSONEncode({
         Combat = self.Combat,
         Visuals = self.Visuals,
-        Misc = self.Misc
+        Misc = self.Misc,
+        UI = self.UI
     })
     pcall(writefile, ConfigFile, data)
 end
@@ -120,342 +125,390 @@ end
 Settings:Load()
 
 -- ============================================
--- Module: UI (Custom Drawing GUI with Glassmorphism)
+-- Module: UI (Recreated each frame for proper layering)
 -- ============================================
-local UI = {}
-local GuiElements = {}
+local UI = {
+    activeTab = "Combat",
+    dragging = false,
+    dragOffset = Vector2.new(0, 0),
+    windowSize = Vector2.new(500, 400),
+}
 
--- Simple Drawing-based window (if Drawing exists)
-if Drawing then
-    -- Background (blur effect can be approximated with semi-transparent rectangle)
+-- Function to draw the entire UI each frame
+function UI:Draw()
+    if not Drawing then return end
+
+    local winPos = Settings.UI.WindowPos
+    local winSize = self.windowSize
+
+    -- Draw background (glassmorphism)
     local bg = Drawing.new("Square")
-    bg.Size = Vector2.new(500, 400)
-    bg.Position = Vector2.new(100, 100)
+    bg.Size = winSize
+    bg.Position = winPos
     bg.Color = Color3.fromRGB(18, 18, 18) -- Deep Charcoal
     bg.Transparency = 0.2
     bg.Filled = true
     bg.Visible = true
-    table.insert(GuiElements, bg)
+    -- Store in temporary table? We'll just let them be garbage collected after frame? Actually we need to keep them visible for the frame.
+    -- Since we're drawing each frame, we need to ensure they are drawn immediately. But Drawing objects persist until removed.
+    -- To avoid accumulation, we should remove previous frame's UI drawings. We'll use a table to store current frame's drawings and remove them at the beginning of next frame.
+    -- Better: create all UI drawings, then at the end of the frame they will remain. To remove them, we need to store them and remove next frame.
+    -- We'll use a simple approach: keep a global list `uiDrawings` and clear it each frame before redrawing.
+    if not _G.uiDrawings then _G.uiDrawings = {} end
+    -- Remove old drawings
+    for _, obj in ipairs(_G.uiDrawings) do
+        pcall(function() obj:Remove() end)
+    end
+    _G.uiDrawings = {}
 
-    -- Title bar
-    local title = Drawing.new("Square")
-    title.Size = Vector2.new(500, 30)
-    title.Position = Vector2.new(100, 100)
-    title.Color = Color3.fromRGB(191, 64, 191)
-    title.Transparency = 0.5
-    title.Filled = true
-    title.Visible = true
-    table.insert(GuiElements, title)
+    -- Helper to add a drawing to the list
+    local function addDrawing(d)
+        table.insert(_G.uiDrawings, d)
+        return d
+    end
+
+    -- Background
+    addDrawing(bg)
+
+    -- Title bar (draggable area)
+    local titleBar = Drawing.new("Square")
+    titleBar.Size = Vector2.new(winSize.X, 30)
+    titleBar.Position = winPos
+    titleBar.Color = Color3.fromRGB(191, 64, 191)
+    titleBar.Transparency = 0.5
+    titleBar.Filled = true
+    titleBar.Visible = true
+    addDrawing(titleBar)
 
     -- Title text
     local titleText = Drawing.new("Text")
     titleText.Text = "[INSERT GAME NAME] | Youlter_GPT"
     titleText.Color = Color3.new(1,1,1)
-    titleText.Position = Vector2.new(110, 105)
+    titleText.Position = winPos + Vector2.new(10, 5)
     titleText.Size = 18
-    titleText.Center = true
+    titleText.Center = false
     titleText.Outline = true
     titleText.Visible = true
-    table.insert(GuiElements, titleText)
+    addDrawing(titleText)
 
-    -- Tabs (simple buttons using rectangles with text)
+    -- Tabs
     local tabs = {"Combat", "Visuals", "Settings", "Credits"}
-    local tabButtons = {}
     for i, name in ipairs(tabs) do
-        local btnBg = Drawing.new("Square")
-        btnBg.Size = Vector2.new(125, 30)
-        btnBg.Position = Vector2.new(100 + (i-1)*125, 130)
-        btnBg.Color = Color3.fromRGB(191, 64, 191)
-        btnBg.Transparency = 0.7
-        btnBg.Filled = true
-        btnBg.Visible = true
-        table.insert(GuiElements, btnBg)
+        local tabX = winPos.X + (i-1) * 125
+        local tabY = winPos.Y + 30
 
-        local btnText = Drawing.new("Text")
-        btnText.Text = name
-        btnText.Color = Color3.new(1,1,1)
-        btnText.Position = Vector2.new(100 + (i-1)*125 + 62, 135)
-        btnText.Size = 16
-        btnText.Center = true
-        btnText.Visible = true
-        table.insert(GuiElements, btnText)
+        local tabBg = Drawing.new("Square")
+        tabBg.Size = Vector2.new(125, 30)
+        tabBg.Position = Vector2.new(tabX, tabY)
+        tabBg.Color = (self.activeTab == name) and Color3.fromRGB(191, 64, 191) or Color3.fromRGB(80, 80, 80)
+        tabBg.Transparency = 0.7
+        tabBg.Filled = true
+        tabBg.Visible = true
+        addDrawing(tabBg)
 
-        tabButtons[name] = {bg = btnBg, text = btnText}
+        local tabText = Drawing.new("Text")
+        tabText.Text = name
+        tabText.Color = Color3.new(1,1,1)
+        tabText.Position = Vector2.new(tabX + 62, tabY + 7)
+        tabText.Size = 16
+        tabText.Center = true
+        tabText.Visible = true
+        addDrawing(tabText)
     end
 
-    -- Content area (will be updated based on active tab)
+    -- Content background
     local contentBg = Drawing.new("Square")
-    contentBg.Size = Vector2.new(500, 300)
-    contentBg.Position = Vector2.new(100, 160)
+    contentBg.Size = Vector2.new(winSize.X, winSize.Y - 60)
+    contentBg.Position = winPos + Vector2.new(0, 60)
     contentBg.Color = Color3.fromRGB(18, 18, 18)
     contentBg.Transparency = 0.3
     contentBg.Filled = true
     contentBg.Visible = true
-    table.insert(GuiElements, contentBg)
+    addDrawing(contentBg)
 
-    -- Dynamic UI elements for each tab (will be created/updated when tab changes)
-    local activeTab = "Combat"
-    local uiElements = {}
+    -- Draw tab-specific content
+    if self.activeTab == "Combat" then
+        -- pSilent toggle
+        local toggleBg = Drawing.new("Square")
+        toggleBg.Size = Vector2.new(20,20)
+        toggleBg.Position = winPos + Vector2.new(20, 80)
+        toggleBg.Color = Settings.Combat.pSilentEnabled and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
+        toggleBg.Filled = true
+        toggleBg.Visible = true
+        addDrawing(toggleBg)
 
-    function UI:SwitchTab(tab)
-        activeTab = tab
-        -- Clear previous dynamic elements
-        for _, elem in ipairs(uiElements) do
-            if elem.Remove then elem:Remove() else elem.Visible = false end
+        local toggleText = Drawing.new("Text")
+        toggleText.Text = "pSilent Aim"
+        toggleText.Color = Color3.new(1,1,1)
+        toggleText.Position = winPos + Vector2.new(50, 80)
+        toggleText.Size = 14
+        toggleText.Visible = true
+        addDrawing(toggleText)
+
+        -- FOV slider (simulated with text)
+        local fovText = Drawing.new("Text")
+        fovText.Text = "FOV: " .. Settings.Combat.FOV
+        fovText.Color = Color3.new(1,1,1)
+        fovText.Position = winPos + Vector2.new(20, 110)
+        fovText.Size = 14
+        fovText.Visible = true
+        addDrawing(fovText)
+
+        -- Hitbox display
+        local hitboxText = Drawing.new("Text")
+        hitboxText.Text = "Hitbox: " .. Settings.Combat.Hitbox
+        hitboxText.Color = Color3.new(1,1,1)
+        hitboxText.Position = winPos + Vector2.new(20, 140)
+        hitboxText.Size = 14
+        hitboxText.Visible = true
+        addDrawing(hitboxText)
+
+        -- Show FOV toggle
+        local fovCircleBg = Drawing.new("Square")
+        fovCircleBg.Size = Vector2.new(20,20)
+        fovCircleBg.Position = winPos + Vector2.new(20, 170)
+        fovCircleBg.Color = Settings.Combat.ShowFOV and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
+        fovCircleBg.Filled = true
+        fovCircleBg.Visible = true
+        addDrawing(fovCircleBg)
+
+        local fovCircleText = Drawing.new("Text")
+        fovCircleText.Text = "Show FOV Circle"
+        fovCircleText.Color = Color3.new(1,1,1)
+        fovCircleText.Position = winPos + Vector2.new(50, 170)
+        fovCircleText.Size = 14
+        fovCircleText.Visible = true
+        addDrawing(fovCircleText)
+
+    elseif self.activeTab == "Visuals" then
+        -- Box ESP toggle
+        local boxBg = Drawing.new("Square")
+        boxBg.Size = Vector2.new(20,20)
+        boxBg.Position = winPos + Vector2.new(20, 80)
+        boxBg.Color = Settings.Visuals.BoxESP and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
+        boxBg.Filled = true
+        boxBg.Visible = true
+        addDrawing(boxBg)
+
+        local boxText = Drawing.new("Text")
+        boxText.Text = "Box ESP"
+        boxText.Color = Color3.new(1,1,1)
+        boxText.Position = winPos + Vector2.new(50, 80)
+        boxText.Size = 14
+        boxText.Visible = true
+        addDrawing(boxText)
+
+        -- Tracer toggle
+        local tracerBg = Drawing.new("Square")
+        tracerBg.Size = Vector2.new(20,20)
+        tracerBg.Position = winPos + Vector2.new(20, 110)
+        tracerBg.Color = Settings.Visuals.Tracer and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
+        tracerBg.Filled = true
+        tracerBg.Visible = true
+        addDrawing(tracerBg)
+
+        local tracerText = Drawing.new("Text")
+        tracerText.Text = "Tracer"
+        tracerText.Color = Color3.new(1,1,1)
+        tracerText.Position = winPos + Vector2.new(50, 110)
+        tracerText.Size = 14
+        tracerText.Visible = true
+        addDrawing(tracerText)
+
+        -- Health Bar toggle
+        local healthBg = Drawing.new("Square")
+        healthBg.Size = Vector2.new(20,20)
+        healthBg.Position = winPos + Vector2.new(20, 140)
+        healthBg.Color = Settings.Visuals.HealthBar and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
+        healthBg.Filled = true
+        healthBg.Visible = true
+        addDrawing(healthBg)
+
+        local healthText = Drawing.new("Text")
+        healthText.Text = "Health Bar"
+        healthText.Color = Color3.new(1,1,1)
+        healthText.Position = winPos + Vector2.new(50, 140)
+        healthText.Size = 14
+        healthText.Visible = true
+        addDrawing(healthText)
+
+        -- Skeleton toggle
+        local skelBg = Drawing.new("Square")
+        skelBg.Size = Vector2.new(20,20)
+        skelBg.Position = winPos + Vector2.new(20, 170)
+        skelBg.Color = Settings.Visuals.Skeleton and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
+        skelBg.Filled = true
+        skelBg.Visible = true
+        addDrawing(skelBg)
+
+        local skelText = Drawing.new("Text")
+        skelText.Text = "Skeleton ESP"
+        skelText.Color = Color3.new(1,1,1)
+        skelText.Position = winPos + Vector2.new(50, 170)
+        skelText.Size = 14
+        skelText.Visible = true
+        addDrawing(skelText)
+
+    elseif self.activeTab == "Settings" then
+        -- Safe mode toggle
+        local safeBg = Drawing.new("Square")
+        safeBg.Size = Vector2.new(20,20)
+        safeBg.Position = winPos + Vector2.new(20, 80)
+        safeBg.Color = Settings.Misc.SafeMode and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
+        safeBg.Filled = true
+        safeBg.Visible = true
+        addDrawing(safeBg)
+
+        local safeText = Drawing.new("Text")
+        safeText.Text = "Safe Mode"
+        safeText.Color = Color3.new(1,1,1)
+        safeText.Position = winPos + Vector2.new(50, 80)
+        safeText.Size = 14
+        safeText.Visible = true
+        addDrawing(safeText)
+
+        -- Save config button
+        local saveText = Drawing.new("Text")
+        saveText.Text = "Save Config"
+        saveText.Color = Color3.fromRGB(191, 64, 191)
+        saveText.Position = winPos + Vector2.new(20, 120)
+        saveText.Size = 16
+        saveText.Visible = true
+        addDrawing(saveText)
+
+        -- Load config button
+        local loadText = Drawing.new("Text")
+        loadText.Text = "Load Config"
+        loadText.Color = Color3.fromRGB(191, 64, 191)
+        loadText.Position = winPos + Vector2.new(20, 150)
+        loadText.Size = 16
+        loadText.Visible = true
+        addDrawing(loadText)
+
+    elseif self.activeTab == "Credits" then
+        local creditText = Drawing.new("Text")
+        creditText.Text = "Youlter_GPT Framework\nCreated for [INSERT GAME NAME]\nDesign: Glassmorphism\nFeatures: pSilent Aim, ESP, Config\nEnjoy."
+        creditText.Color = Color3.new(1,1,1)
+        creditText.Position = winPos + Vector2.new(20, 80)
+        creditText.Size = 14
+        creditText.Visible = true
+        addDrawing(creditText)
+    end
+end
+
+-- Input handling for UI interactions (tabs, toggles, dragging)
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        local mousePos = Vector2.new(Mouse.X, Mouse.Y)
+        local winPos = Settings.UI.WindowPos
+        local winSize = UI.windowSize
+
+        -- Check if clicked on title bar (for dragging)
+        if mousePos.X >= winPos.X and mousePos.X <= winPos.X + winSize.X and
+           mousePos.Y >= winPos.Y and mousePos.Y <= winPos.Y + 30 then
+            UI.dragging = true
+            UI.dragOffset = mousePos - winPos
         end
-        uiElements = {}
 
-        if tab == "Combat" then
+        -- Check tab clicks (using current winPos)
+        for i, name in ipairs({"Combat", "Visuals", "Settings", "Credits"}) do
+            local tabX = winPos.X + (i-1) * 125
+            local tabY = winPos.Y + 30
+            if mousePos.X >= tabX and mousePos.X <= tabX + 125 and
+               mousePos.Y >= tabY and mousePos.Y <= tabY + 30 then
+                UI.activeTab = name
+                break
+            end
+        end
+
+        -- Check content area clicks based on active tab
+        if UI.activeTab == "Combat" then
             -- pSilent toggle
-            local toggleBg = Drawing.new("Square")
-            toggleBg.Size = Vector2.new(20,20)
-            toggleBg.Position = Vector2.new(120, 180)
-            toggleBg.Color = Settings.Combat.pSilentEnabled and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
-            toggleBg.Filled = true
-            toggleBg.Visible = true
-            table.insert(uiElements, toggleBg)
-
-            local toggleText = Drawing.new("Text")
-            toggleText.Text = "pSilent Aim"
-            toggleText.Color = Color3.new(1,1,1)
-            toggleText.Position = Vector2.new(150, 180)
-            toggleText.Size = 14
-            toggleText.Visible = true
-            table.insert(uiElements, toggleText)
-
-            -- FOV slider (simulated with text)
-            local fovText = Drawing.new("Text")
-            fovText.Text = "FOV: " .. Settings.Combat.FOV
-            fovText.Color = Color3.new(1,1,1)
-            fovText.Position = Vector2.new(120, 210)
-            fovText.Size = 14
-            fovText.Visible = true
-            table.insert(uiElements, fovText)
-
-            -- Hitbox dropdown
-            local hitboxText = Drawing.new("Text")
-            hitboxText.Text = "Hitbox: " .. Settings.Combat.Hitbox
-            hitboxText.Color = Color3.new(1,1,1)
-            hitboxText.Position = Vector2.new(120, 240)
-            hitboxText.Size = 14
-            hitboxText.Visible = true
-            table.insert(uiElements, hitboxText)
-
-            -- FOV circle toggle
-            local fovCircleBg = Drawing.new("Square")
-            fovCircleBg.Size = Vector2.new(20,20)
-            fovCircleBg.Position = Vector2.new(120, 270)
-            fovCircleBg.Color = Settings.Combat.ShowFOV and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
-            fovCircleBg.Filled = true
-            fovCircleBg.Visible = true
-            table.insert(uiElements, fovCircleBg)
-
-            local fovCircleText = Drawing.new("Text")
-            fovCircleText.Text = "Show FOV Circle"
-            fovCircleText.Color = Color3.new(1,1,1)
-            fovCircleText.Position = Vector2.new(150, 270)
-            fovCircleText.Size = 14
-            fovCircleText.Visible = true
-            table.insert(uiElements, fovCircleText)
-        elseif tab == "Visuals" then
-            -- Box ESP toggle
-            local boxBg = Drawing.new("Square")
-            boxBg.Size = Vector2.new(20,20)
-            boxBg.Position = Vector2.new(120, 180)
-            boxBg.Color = Settings.Visuals.BoxESP and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
-            boxBg.Filled = true
-            boxBg.Visible = true
-            table.insert(uiElements, boxBg)
-
-            local boxText = Drawing.new("Text")
-            boxText.Text = "Box ESP"
-            boxText.Color = Color3.new(1,1,1)
-            boxText.Position = Vector2.new(150, 180)
-            boxText.Size = 14
-            boxText.Visible = true
-            table.insert(uiElements, boxText)
-
-            -- Tracer toggle
-            local tracerBg = Drawing.new("Square")
-            tracerBg.Size = Vector2.new(20,20)
-            tracerBg.Position = Vector2.new(120, 210)
-            tracerBg.Color = Settings.Visuals.Tracer and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
-            tracerBg.Filled = true
-            tracerBg.Visible = true
-            table.insert(uiElements, tracerBg)
-
-            local tracerText = Drawing.new("Text")
-            tracerText.Text = "Tracer"
-            tracerText.Color = Color3.new(1,1,1)
-            tracerText.Position = Vector2.new(150, 210)
-            tracerText.Size = 14
-            tracerText.Visible = true
-            table.insert(uiElements, tracerText)
-
-            -- Health Bar toggle
-            local healthBg = Drawing.new("Square")
-            healthBg.Size = Vector2.new(20,20)
-            healthBg.Position = Vector2.new(120, 240)
-            healthBg.Color = Settings.Visuals.HealthBar and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
-            healthBg.Filled = true
-            healthBg.Visible = true
-            table.insert(uiElements, healthBg)
-
-            local healthText = Drawing.new("Text")
-            healthText.Text = "Health Bar"
-            healthText.Color = Color3.new(1,1,1)
-            healthText.Position = Vector2.new(150, 240)
-            healthText.Size = 14
-            healthText.Visible = true
-            table.insert(uiElements, healthText)
-
-            -- Skeleton toggle
-            local skelBg = Drawing.new("Square")
-            skelBg.Size = Vector2.new(20,20)
-            skelBg.Position = Vector2.new(120, 270)
-            skelBg.Color = Settings.Visuals.Skeleton and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
-            skelBg.Filled = true
-            skelBg.Visible = true
-            table.insert(uiElements, skelBg)
-
-            local skelText = Drawing.new("Text")
-            skelText.Text = "Skeleton ESP"
-            skelText.Color = Color3.new(1,1,1)
-            skelText.Position = Vector2.new(150, 270)
-            skelText.Size = 14
-            skelText.Visible = true
-            table.insert(uiElements, skelText)
-        elseif tab == "Settings" then
-            -- Safe mode toggle
-            local safeBg = Drawing.new("Square")
-            safeBg.Size = Vector2.new(20,20)
-            safeBg.Position = Vector2.new(120, 180)
-            safeBg.Color = Settings.Misc.SafeMode and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
-            safeBg.Filled = true
-            safeBg.Visible = true
-            table.insert(uiElements, safeBg)
-
-            local safeText = Drawing.new("Text")
-            safeText.Text = "Safe Mode"
-            safeText.Color = Color3.new(1,1,1)
-            safeText.Position = Vector2.new(150, 180)
-            safeText.Size = 14
-            safeText.Visible = true
-            table.insert(uiElements, safeText)
-
-            -- Save config button (simulate with text)
-            local saveText = Drawing.new("Text")
-            saveText.Text = "Save Config (click here)"
-            saveText.Color = Color3.fromRGB(191, 64, 191)
-            saveText.Position = Vector2.new(120, 220)
-            saveText.Size = 16
-            saveText.Visible = true
-            table.insert(uiElements, saveText)
-
-            -- Load config button
-            local loadText = Drawing.new("Text")
-            loadText.Text = "Load Config (click here)"
-            loadText.Color = Color3.fromRGB(191, 64, 191)
-            loadText.Position = Vector2.new(120, 250)
-            loadText.Size = 16
-            loadText.Visible = true
-            table.insert(uiElements, loadText)
-        elseif tab == "Credits" then
-            local creditText = Drawing.new("Text")
-            creditText.Text = "Youlter_GPT Framework\nCreated for [INSERT GAME NAME]\nDesign: Glassmorphism\nFeatures: pSilent Aim, ESP, Config\nEnjoy."
-            creditText.Color = Color3.new(1,1,1)
-            creditText.Position = Vector2.new(120, 180)
-            creditText.Size = 14
-            creditText.Visible = true
-            table.insert(uiElements, creditText)
+            if mousePos.X >= winPos.X + 20 and mousePos.X <= winPos.X + 40 and
+               mousePos.Y >= winPos.Y + 80 and mousePos.Y <= winPos.Y + 100 then
+                Settings.Combat.pSilentEnabled = not Settings.Combat.pSilentEnabled
+            end
+            -- Show FOV toggle
+            if mousePos.X >= winPos.X + 20 and mousePos.X <= winPos.X + 40 and
+               mousePos.Y >= winPos.Y + 170 and mousePos.Y <= winPos.Y + 190 then
+                Settings.Combat.ShowFOV = not Settings.Combat.ShowFOV
+            end
+            -- Hitbox cycle (click on text area)
+            if mousePos.X >= winPos.X + 20 and mousePos.X <= winPos.X + 200 and
+               mousePos.Y >= winPos.Y + 140 and mousePos.Y <= winPos.Y + 160 then
+                local opts = {"Head", "Torso", "Random"}
+                local idx = 1
+                for i, v in ipairs(opts) do if v == Settings.Combat.Hitbox then idx = i+1 end end
+                Settings.Combat.Hitbox = opts[(idx-1)%3+1]
+            end
+            -- FOV slider (click on text area to adjust)
+            if mousePos.X >= winPos.X + 20 and mousePos.X <= winPos.X + 280 and
+               mousePos.Y >= winPos.Y + 110 and mousePos.Y <= winPos.Y + 130 then
+                local rel = (mousePos.X - (winPos.X + 20)) / 260
+                Settings.Combat.FOV = math.floor(30 + rel * 200)
+            end
+        elseif UI.activeTab == "Visuals" then
+            -- Box ESP
+            if mousePos.X >= winPos.X + 20 and mousePos.X <= winPos.X + 40 and
+               mousePos.Y >= winPos.Y + 80 and mousePos.Y <= winPos.Y + 100 then
+                Settings.Visuals.BoxESP = not Settings.Visuals.BoxESP
+            end
+            -- Tracer
+            if mousePos.X >= winPos.X + 20 and mousePos.X <= winPos.X + 40 and
+               mousePos.Y >= winPos.Y + 110 and mousePos.Y <= winPos.Y + 130 then
+                Settings.Visuals.Tracer = not Settings.Visuals.Tracer
+            end
+            -- Health Bar
+            if mousePos.X >= winPos.X + 20 and mousePos.X <= winPos.X + 40 and
+               mousePos.Y >= winPos.Y + 140 and mousePos.Y <= winPos.Y + 160 then
+                Settings.Visuals.HealthBar = not Settings.Visuals.HealthBar
+            end
+            -- Skeleton
+            if mousePos.X >= winPos.X + 20 and mousePos.X <= winPos.X + 40 and
+               mousePos.Y >= winPos.Y + 170 and mousePos.Y <= winPos.Y + 190 then
+                Settings.Visuals.Skeleton = not Settings.Visuals.Skeleton
+            end
+        elseif UI.activeTab == "Settings" then
+            -- Safe mode
+            if mousePos.X >= winPos.X + 20 and mousePos.X <= winPos.X + 40 and
+               mousePos.Y >= winPos.Y + 80 and mousePos.Y <= winPos.Y + 100 then
+                Settings.Misc.SafeMode = not Settings.Misc.SafeMode
+            end
+            -- Save config
+            if mousePos.X >= winPos.X + 20 and mousePos.X <= winPos.X + 120 and
+               mousePos.Y >= winPos.Y + 120 and mousePos.Y <= winPos.Y + 140 then
+                Settings:Save()
+            end
+            -- Load config
+            if mousePos.X >= winPos.X + 20 and mousePos.X <= winPos.X + 120 and
+               mousePos.Y >= winPos.Y + 150 and mousePos.Y <= winPos.Y + 170 then
+                Settings:Load()
+            end
         end
     end
+end)
 
-    UI:SwitchTab("Combat")
+UserInputService.InputChanged:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.UserInputType == Enum.UserInputType.MouseMovement and UI.dragging then
+        local mousePos = Vector2.new(Mouse.X, Mouse.Y)
+        Settings.UI.WindowPos = mousePos - UI.dragOffset
+    end
+end)
 
-    -- Input handling for UI (click detection)
-    UserInputService.InputBegan:Connect(function(input, gameProcessed)
-        if gameProcessed then return end
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            local mousePos = Vector2.new(Mouse.X, Mouse.Y)
-            -- Check tab clicks
-            for name, btns in pairs(tabButtons) do
-                local btnPos = btns.bg.Position
-                local btnSize = btns.bg.Size
-                if mousePos.X >= btnPos.X and mousePos.X <= btnPos.X + btnSize.X and
-                   mousePos.Y >= btnPos.Y and mousePos.Y <= btnPos.Y + btnSize.Y then
-                    UI:SwitchTab(name)
-                    break
-                end
-            end
-            -- Check dynamic elements (simple hitboxes for toggles)
-            if activeTab == "Combat" then
-                -- pSilent toggle
-                if mousePos.X >= 120 and mousePos.X <= 140 and mousePos.Y >= 180 and mousePos.Y <= 200 then
-                    Settings.Combat.pSilentEnabled = not Settings.Combat.pSilentEnabled
-                    UI:SwitchTab(activeTab)
-                end
-                -- FOV circle toggle
-                if mousePos.X >= 120 and mousePos.X <= 140 and mousePos.Y >= 270 and mousePos.Y <= 290 then
-                    Settings.Combat.ShowFOV = not Settings.Combat.ShowFOV
-                    UI:SwitchTab(activeTab)
-                end
-                -- Hitbox cycle (simplified)
-                if mousePos.X >= 120 and mousePos.X <= 250 and mousePos.Y >= 240 and mousePos.Y <= 260 then
-                    local opts = {"Head", "Torso", "Random"}
-                    local idx = 1
-                    for i, v in ipairs(opts) do if v == Settings.Combat.Hitbox then idx = i+1 end end
-                    Settings.Combat.Hitbox = opts[(idx-1)%3+1]
-                    UI:SwitchTab(activeTab)
-                end
-                -- FOV change via slider (click area)
-                if mousePos.X >= 120 and mousePos.X <= 380 and mousePos.Y >= 210 and mousePos.Y <= 230 then
-                    -- approximate: set FOV based on mouse X relative
-                    local rel = (mousePos.X - 120) / 260
-                    Settings.Combat.FOV = math.floor(30 + rel * 200)
-                    UI:SwitchTab(activeTab)
-                end
-            elseif activeTab == "Visuals" then
-                if mousePos.X >= 120 and mousePos.X <= 140 and mousePos.Y >= 180 and mousePos.Y <= 200 then
-                    Settings.Visuals.BoxESP = not Settings.Visuals.BoxESP
-                    UI:SwitchTab(activeTab)
-                end
-                if mousePos.X >= 120 and mousePos.X <= 140 and mousePos.Y >= 210 and mousePos.Y <= 230 then
-                    Settings.Visuals.Tracer = not Settings.Visuals.Tracer
-                    UI:SwitchTab(activeTab)
-                end
-                if mousePos.X >= 120 and mousePos.X <= 140 and mousePos.Y >= 240 and mousePos.Y <= 260 then
-                    Settings.Visuals.HealthBar = not Settings.Visuals.HealthBar
-                    UI:SwitchTab(activeTab)
-                end
-                if mousePos.X >= 120 and mousePos.X <= 140 and mousePos.Y >= 270 and mousePos.Y <= 290 then
-                    Settings.Visuals.Skeleton = not Settings.Visuals.Skeleton
-                    UI:SwitchTab(activeTab)
-                end
-            elseif activeTab == "Settings" then
-                if mousePos.X >= 120 and mousePos.X <= 140 and mousePos.Y >= 180 and mousePos.Y <= 200 then
-                    Settings.Misc.SafeMode = not Settings.Misc.SafeMode
-                    UI:SwitchTab(activeTab)
-                end
-                if mousePos.X >= 120 and mousePos.X <= 250 and mousePos.Y >= 220 and mousePos.Y <= 240 then
-                    Settings:Save()
-                end
-                if mousePos.X >= 120 and mousePos.X <= 250 and mousePos.Y >= 250 and mousePos.Y <= 270 then
-                    Settings:Load()
-                    UI:SwitchTab(activeTab)
-                end
-            end
-        end
-    end)
-end
+UserInputService.InputEnded:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        UI.dragging = false
+    end
+end)
 
 -- ============================================
 -- Module: Combat (pSilent Aim)
 -- ============================================
 local Combat = {}
 
--- Hook into UserCmd or tool firing. For demonstration, we'll override the LocalPlayer's mouse target.
--- pSilent aim: change the target without moving camera.
 function Combat:Run()
     if not Settings.Combat.pSilentEnabled then return end
     if Settings.Misc.SafeMode then return end
@@ -464,31 +517,18 @@ function Combat:Run()
     if target then
         local hitPos = Utils:GetHitboxPosition(target, Settings.Combat.Hitbox)
         if hitPos then
-            -- pSilent: set mouse's target (this works for tools that use mouse.Hit or mouse.Target)
-            -- Some games use Camera's CFrame; we can also override the camera temporarily.
-            -- For projectile-based games, we might need to modify the arguments sent to server.
-            -- Here we set the mouse.Hit to the target's head position.
-            -- This is a simple example and may not work for all games.
-            local oldCamCF = Camera.CFrame
-            Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, hitPos) -- simulate looking at target silently?
-            -- But that moves camera. Instead, we can just set mouse.Hit.
+            -- pSilent: set mouse's target
             Mouse.Hit = CFrame.new(hitPos)
-            -- For tools, you might need to override the fire event.
         end
     end
 end
 
--- Connect to input (e.g., when key pressed)
 UserInputService.InputBegan:Connect(function(input, gp)
     if gp then return end
     if input.KeyCode == Settings.Combat.pSilentKey then
         Combat:Run()
     end
 end)
-
--- Alternatively, bind to a loop to constantly apply? Usually pSilent is triggered on fire.
--- We'll use a pre-fire hook approach (simplified: on key down we aim, then when mouse button fires, it uses that aim)
--- But for this script, we'll just run on key press.
 
 -- ============================================
 -- Module: Visuals (ESP)
@@ -501,8 +541,8 @@ function Visuals:Update()
     if not Drawing then return end
 
     -- Clear previous ESP drawings
-    for _, obj in pairs(espDrawings) do
-        if obj.Remove then obj:Remove() end
+    for _, obj in ipairs(espDrawings) do
+        pcall(function() obj:Remove() end)
     end
     espDrawings = {}
 
@@ -520,10 +560,10 @@ function Visuals:Update()
             local pos, onScreen = Utils:WorldToScreen(root.Position)
             if not onScreen then continue end
 
-            -- Calculate box dimensions (simple 2D bounding box based on root and head)
+            -- Calculate box dimensions
             local head = char:FindFirstChild("Head")
             local headPos, headOnScreen = head and Utils:WorldToScreen(head.Position) or nil
-            if not headOnScreen then headPos = pos + Vector2.new(0, -30) end -- fallback
+            if not headOnScreen then headPos = pos + Vector2.new(0, -30) end
 
             local height = (headPos - pos).Magnitude * 2.5
             local width = height * 0.6
@@ -531,10 +571,10 @@ function Visuals:Update()
             local boxBottomRight = pos + Vector2.new(width/2, height)
 
             if Settings.Visuals.BoxESP then
-                -- Corner box (4 lines per corner)
                 local thickness = Settings.Visuals.BoxThickness
                 local cornerLen = 5
                 local color = Settings.Visuals.BoxColor
+
                 -- Top left corner
                 local l1 = Drawing.new("Line")
                 l1.From = boxTopLeft
@@ -609,7 +649,7 @@ function Visuals:Update()
 
             if Settings.Visuals.Tracer then
                 local tracer = Drawing.new("Line")
-                tracer.From = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y) -- bottom center
+                tracer.From = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y)
                 tracer.To = pos
                 tracer.Color = Settings.Visuals.TracerColor
                 tracer.Thickness = 1
@@ -623,7 +663,6 @@ function Visuals:Update()
                 local barWidth = 3
                 local barPos = Vector2.new(boxTopLeft.X - barWidth - 2, boxTopLeft.Y)
 
-                -- Background
                 local bgBar = Drawing.new("Square")
                 bgBar.Size = Vector2.new(barWidth, barHeight)
                 bgBar.Position = barPos
@@ -632,17 +671,16 @@ function Visuals:Update()
                 bgBar.Visible = true
                 table.insert(espDrawings, bgBar)
 
-                -- Health fill
                 local fillBar = Drawing.new("Square")
                 fillBar.Size = Vector2.new(barWidth, barHeight * healthPercent)
                 fillBar.Position = barPos + Vector2.new(0, barHeight * (1 - healthPercent))
-                fillBar.Color = Color3.new(1 - healthPercent, healthPercent, 0) -- red to green
+                fillBar.Color = Color3.new(1 - healthPercent, healthPercent, 0)
                 fillBar.Filled = true
                 fillBar.Visible = true
                 table.insert(espDrawings, fillBar)
             end
 
-            if Settings.Visuals.Skeleton and char:FindFirstChild("Head") and char:FindFirstChild("UpperTorso") and char:FindFirstChild("LowerTorso") then
+            if Settings.Visuals.Skeleton and char:FindFirstChild("Head") and char:FindFirstChild("UpperTorso") then
                 local joints = {
                     {"Head", "UpperTorso"},
                     {"UpperTorso", "LowerTorso"},
@@ -676,40 +714,35 @@ end
 -- ============================================
 -- Main Loop
 -- ============================================
+local fovCircle -- persistent FOV circle
+
 RunService.RenderStepped:Connect(function()
+    -- Update ESP first (creates new drawings)
     Visuals:Update()
 
-    -- Draw FOV circle if enabled
-    if Drawing and Settings.Combat.ShowFOV then
-        -- Create a circle using many line segments (simplified: use a circle drawing if supported, else many lines)
-        -- For simplicity, we assume Drawing has Circle (some executors do)
-        local circle = Drawing.new("Circle")
-        circle.Radius = Settings.Combat.FOV
-        circle.Position = Vector2.new(Mouse.X, Mouse.Y)
-        circle.Color = Settings.Combat.FOVColor
-        circle.Thickness = 1
-        circle.NumSides = 32
-        circle.Filled = false
-        circle.Visible = true
-        -- We need to manage its lifecycle; we'll draw and destroy next frame.
-        -- But to avoid accumulation, we can draw in a separate table and clear after.
-        -- For simplicity, we'll just create a persistent one and update its position.
-        if not fovCircle then
-            fovCircle = Drawing.new("Circle")
+    -- Update FOV circle (single object)
+    if Drawing then
+        if Settings.Combat.ShowFOV then
+            if not fovCircle then
+                fovCircle = Drawing.new("Circle")
+                fovCircle.NumSides = 64
+                fovCircle.Thickness = 1
+                fovCircle.Filled = false
+            end
+            fovCircle.Radius = Settings.Combat.FOV
+            fovCircle.Position = Vector2.new(Mouse.X, Mouse.Y)
+            fovCircle.Color = Settings.Combat.FOVColor
+            fovCircle.Visible = true
+        elseif fovCircle then
+            fovCircle.Visible = false
         end
-        fovCircle.Radius = Settings.Combat.FOV
-        fovCircle.Position = Vector2.new(Mouse.X, Mouse.Y)
-        fovCircle.Color = Settings.Combat.FOVColor
-        fovCircle.Thickness = 1
-        fovCircle.NumSides = 64
-        fovCircle.Filled = false
-        fovCircle.Visible = true
-    elseif fovCircle then
-        fovCircle.Visible = false
     end
+
+    -- Draw UI after ESP (so UI appears on top)
+    UI:Draw()
 end)
 
 -- ============================================
 -- Initialization
 -- ============================================
-print("[Youlter_GPT] Framework loaded for [PIDARAS]")
+print("[Youlter_GPT] Framework loaded for [INSERT GAME NAME] (Fixed version)")
